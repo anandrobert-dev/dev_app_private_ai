@@ -3,3 +3,6 @@ sentence-transformers
 faiss-cpu
 numpy
 langchain-community
+pypdf
+pandas
+openpyxl

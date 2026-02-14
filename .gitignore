@@ -10,3 +10,6 @@ _env/
 data_raw/
 data_vectors/
 embeddings/
+client_tables/
+logs/
+test_data/

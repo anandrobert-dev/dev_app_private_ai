@@ -4,9 +4,10 @@ import numpy as np
 from pathlib import Path
 import pandas as pd
 from pypdf import PdfReader
+import sys
 
 # Paths
-CLIENT_ID = "client_demo"
+CLIENT_ID = sys.argv[1] if len(sys.argv) > 1 else "client_demo"
 
 DATA_DIR = Path(f"data_raw/{CLIENT_ID}")
 VECTOR_DIR = Path(f"data_vectors/{CLIENT_ID}")
@@ -18,50 +19,93 @@ model = SentenceTransformer("./embeddings/bge-base")
 documents = []
 sources = []
 
-# Read files
+# Read and chunk files
 for file in DATA_DIR.iterdir():
-
-    text = ""
+    file_text = ""
+    print(f"Processing: {file.name} ({file.stat().st_size / 1024:.0f} KB)...")
 
     if file.suffix == ".txt":
-        text = file.read_text()
+        try:
+            file_text = file.read_text(errors="ignore")
+        except Exception as e:
+            print(f"  ERROR reading text file: {e}")
+            continue
 
     elif file.suffix == ".pdf":
         try:
             reader = PdfReader(str(file))
-            for page in reader.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + " "
-        except Exception:
-            print(f"Skipping invalid PDF: {file.name}")
+            total_pages = len(reader.pages)
+            print(f"  PDF has {total_pages} pages")
+
+            for i, page in enumerate(reader.pages):
+                try:
+                    page_text = page.extract_text()
+                    if page_text:
+                        file_text += page_text + " "
+                    # Periodically report progress for very large PDFs
+                    if (i + 1) % 50 == 0:
+                        print(f"    ... extracted {i+1}/{total_pages} pages")
+                except Exception as e:
+                    print(f"  WARNING: page {i+1} failed: {e}")
+                    continue
+
+        except Exception as e:
+            print(f"  ERROR reading PDF: {e}")
             continue
 
     elif file.suffix in [".csv", ".xlsx"]:
-        df = pd.read_csv(file) if file.suffix == ".csv" else pd.read_excel(file)
-        text = " ".join(df.astype(str).values.flatten())
+        try:
+            df = pd.read_csv(file) if file.suffix == ".csv" else pd.read_excel(file)
+            file_text = " ".join(df.astype(str).values.flatten())
+        except Exception as e:
+            print(f"  ERROR reading spreadsheet: {e}")
+            continue
 
-    if not text.strip():
+    if not file_text.strip():
         continue
 
-    sentences = [s.strip() for s in text.split(".") if s.strip()]
-
+    # Split into sentences and create chunks
+    sentences = [s.strip() for s in file_text.split(".") if s.strip()]
     buffer = ""
+    file_chunks = 0
     for sentence in sentences:
         buffer += sentence + ". "
-        if len(buffer) > 120:
+        if len(buffer) > 150: # Slightly larger chunks for better context
             documents.append(buffer.strip())
             sources.append(file.name)
             buffer = ""
+            file_chunks += 1
 
     if buffer:
         documents.append(buffer.strip())
         sources.append(file.name)
+        file_chunks += 1
+    
+    print(f"  Generated {file_chunks} chunks")
 
-# Create embeddings
-embeddings = model.encode(documents)
+if not documents:
+    print("WARNING: No documents to index!")
+    sys.exit(0)
+
+# Create embeddings in batches to save RAM
+BATCH_SIZE = 32
+total_chunks = len(documents)
+print(f"\nCreating embeddings for {total_chunks} chunks in batches of {BATCH_SIZE}...")
+
+all_embeddings = []
+for i in range(0, total_chunks, BATCH_SIZE):
+    batch = documents[i:i + BATCH_SIZE]
+    batch_embeddings = model.encode(batch)
+    all_embeddings.append(batch_embeddings)
+    
+    # Progress report
+    progress = min(100, (i + len(batch)) / total_chunks * 100)
+    print(f"  Progress: {progress:.1f}% ({i + len(batch)}/{total_chunks})")
+
+embeddings = np.vstack(all_embeddings)
 
 # Store in FAISS
+print("\nSaving index...")
 index = faiss.IndexFlatL2(embeddings.shape[1])
 index.add(np.array(embeddings))
 
@@ -73,6 +117,8 @@ with open(VECTOR_DIR / "sources.txt", "w") as f:
 
 with open(VECTOR_DIR / "chunks.txt", "w") as f:
     for chunk in documents:
-        f.write(chunk.replace("\n", " ") + "\n")
+        # Save chunks as single lines
+        clean_chunk = chunk.replace("\n", " ").strip()
+        f.write(clean_chunk + "\n")
 
-print("Ingestion complete. Chunks:", len(documents))
+print(f"Ingestion complete. Total Chunks: {len(documents)}")

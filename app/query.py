@@ -4,7 +4,7 @@ import numpy as np
 from pathlib import Path
 import subprocess
 
-CLIENT_ID = "client_test"
+CLIENT_ID = "client_demo"
 
 VECTOR_DIR = Path(f"data_vectors/{CLIENT_ID}")
 
